@@ -47,7 +47,7 @@ def collect(settings, store=None, now=None):
     summary = {}
     def run(name, interval, fn):
         previous = store.get("status", name, {})
-        if previous.get("ok") is False and not any(code in previous.get("message", "") for code in ["HTTP 403", "HTTP 429"]):
+        if previous.get("ok") is False and not any(code in previous.get("message", "") for code in ["HTTP 403"]):
             interval = min(interval, 120)
         if not store.due(name, interval, now):
             return
