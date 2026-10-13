@@ -5,17 +5,17 @@ from .config import Settings
 from .domain import utcnow, iso, dt
 from .store import Store
 from .providers import daily_yields, intraday_quotes, parse_bls_schedule, parse_bea, parse_fed, get, BLS_SCHEDULES, BEA_URL, FED_URL, te_calendar
-from .research import research_events, generate_outlook
+from .research import research_events, generate_outlook, research_outlook_context, yield_trends, OUTLOOK_VERSION
 from .analysis import released_since, latest_quotes, commentary
 
 
-def ai_slot(store, settings, now):
+def ai_slot(store, settings, now, count=1):
     key = "ai_requests_" + now.date().isoformat()
     used = store.get("meta", key, 0)
-    if used >= settings.ai_daily_request_limit:
+    if used + count > settings.ai_daily_request_limit:
         return False
     # Reserve before attempting the call, including failed calls in the budget.
-    store.put("meta", key, used + 1)
+    store.put("meta", key, used + count)
     return True
 
 
@@ -47,7 +47,7 @@ def collect(settings, store=None, now=None):
     summary = {}
     def run(name, interval, fn):
         previous = store.get("status", name, {})
-        if previous.get("ok") is False and not any(code in previous.get("message", "") for code in ["HTTP 403"]):
+        if previous.get("ok") is False and "HTTP 403" not in previous.get("message", ""):
             interval = min(interval, 120)
         if not store.due(name, interval, now):
             return
@@ -64,7 +64,7 @@ def collect(settings, store=None, now=None):
             if code == 403:
                 message = "Update failed (HTTP 403). The publisher rejected this server's request. Date coverage from this source remains unavailable; existing records retained."
             elif code == 429:
-                message = "Update failed (HTTP 429). Provider rate limit; regular retry interval retained."
+                message = "Update failed (HTTP 429). Provider rate limit or exhausted API credits/quota; retry eligible in 2 minutes."
             else:
                 message = f"Update failed ({detail}). Existing records retained; retry eligible in 2 minutes."
             store.status(name, False, message, utcnow())
@@ -102,18 +102,21 @@ def collect(settings, store=None, now=None):
         return f"{len(rows)} sourced records checked; {rejected} invalid records skipped. Search coverage may be incomplete."
 
     def outlook():
-        if not ai_slot(store, settings, now):
-            return "Daily AI request cap reached; latest outlook retained"
         events = released_since(store.all("event"), store.get("meta", "launch_at"))[:40]
         compact = [{k: e.get(k) for k in ["id", "label", "reference", "release_at", "actual", "actual_text", "frozen_consensus", "unit", "first_actual_source", "frozen_consensus_source"]} for e in events]
         payload = dict(as_of=iso(utcnow()), launch_at=store.get("meta", "launch_at"), latest_yields=latest_quotes(store.all("quote")),
-            events=compact, news=sorted(store.all("news"), key=lambda x: x["retrieved_at"], reverse=True)[:5])
+            events=compact, yield_trends=yield_trends(store.all("quote"), utcnow()),
+            news=sorted(store.all("news"), key=lambda x: x["retrieved_at"], reverse=True)[:5])
         if not payload["latest_yields"]:
             return "Waiting for verified yields before generating an outlook"
+        if not ai_slot(store, settings, now, count=2):
+            return "Daily AI request cap reached; latest outlook retained"
+        payload["macro_context"] = research_outlook_context(settings, utcnow())
         result = generate_outlook(settings, payload)
         result.update(as_of=payload["as_of"], horizon="Next 1–3 months", model=settings.openai_model,
-            evidence_snapshot=payload, label="AI scenario analysis · uncalibrated")
+            evidence_snapshot=payload, outlook_version=OUTLOOK_VERSION, label="AI scenario analysis · uncalibrated")
         store.put("outlook", result["as_of"], result)
+        store.put("meta", "outlook_version", OUTLOOK_VERSION)
         return "A sourced scenario outlook was saved"
 
     try:
@@ -131,7 +134,9 @@ def collect(settings, store=None, now=None):
                 and dt(e["release_at"]) >= dt(store.get("meta", "launch_at")) and not e.get("actual_first_seen") for e in store.all("event"))
             interval = 1800 if pending else settings.research_interval_minutes * 60
             run("Release research", interval, research)
-            run("Outlook analysis", 6 * 3600, outlook)
+            # Refresh once on upgrade; failed upgrades still observe the two-minute cooldown.
+            outlook_interval = 6 * 3600 if store.get("meta", "outlook_version") == OUTLOOK_VERSION else 120
+            run("Outlook analysis", outlook_interval, outlook)
         events, quotes = store.all("event"), store.all("quote")
         for event in released_since(events, store.get("meta", "launch_at")):
             for window in ["15 min", "60 min", "Release-day close"]:
