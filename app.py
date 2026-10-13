@@ -223,6 +223,17 @@ def dashboard():
         if current:
             snap=current.get("evidence_snapshot",{})
             st.write("Evidence through "+time_label(snap.get("as_of"),zone))
+            if snap.get("macro_context"):
+                st.caption("Macroeconomic background · may include releases from before launch")
+                for fact in snap["macro_context"]:
+                    st.link_button(fact["topic"].title()+" · "+fact["published_date"]+" · "+fact.get("reference", ""), fact["source"])
+                    st.write(fact["summary"])
+            if snap.get("yield_trends"):
+                st.caption("Daily yield history · observed changes in basis points")
+                for trend in snap["yield_trends"]:
+                    st.write(f'{trend["tenor"]} · {trend["available_daily_observations"]} observations · {trend["source"]}')
+                    for move in trend["moves"]:
+                        st.write(f'{move["lookback_calendar_days"]}-day lookback: {move["change_bp"]:+.1f} bp ({move["from_date"]} to {move["to_date"]})')
             for e in snap.get("events",[]):
                 if e.get("first_actual_source"):
                     st.link_button(e["label"]+" · "+e["reference"],e["first_actual_source"])
@@ -232,7 +243,7 @@ def dashboard():
                 st.caption(time_label(old["as_of"],zone))
                 st.write(old["paragraph"])
         else:
-            st.write("Connect OPENAI_API_KEY to enable sourced outlook snapshots. Every generated version is retained.")
+            st.write("AI research is configured; waiting for the first successful outlook. Check Source health for its status." if settings.openai_api_key else "Connect OPENAI_API_KEY to enable sourced outlook snapshots. Every generated version is retained.")
 
     st.markdown('<div class="section-kicker">03 / SINCE LAUNCH</div>', unsafe_allow_html=True)
     st.header("The release & reaction ledger")
