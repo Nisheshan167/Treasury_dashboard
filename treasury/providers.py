@@ -1,6 +1,7 @@
 """External adapters. Network errors are isolated by the collector, never fabricated."""
 import io
 import re
+import xml.etree.ElementTree as ET_XML
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
@@ -29,7 +30,7 @@ def get(url, **kwargs):
     return response
 
 
-def daily_yields(settings, now):
+def fred_daily_yields(settings, now):
     output = []
     start = (now - timedelta(days=400)).date().isoformat()
     for series, tenor in [("DGS10", "10Y"), ("DGS30", "30Y")]:
@@ -48,6 +49,55 @@ def daily_yields(settings, now):
                 observation_date=row["date"], frequency="daily", delay="End-of-day series",
                 source=f"FRED {series}", source_url=f"https://fred.stlouisfed.org/series/{series}"))
     return output
+
+
+TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
+
+
+def parse_treasury_xml(content, start=None):
+    """Treasury's public par-yield feed: retain its own source and series definition."""
+    root = ET_XML.fromstring(content)
+    output = []
+    for properties in root.findall(".//{*}properties"):
+        fields = {node.tag.rsplit("}", 1)[-1]: node.text for node in properties}
+        date = (fields.get("NEW_DATE") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or (start and date < start):
+            continue
+        for key, tenor in [("BC_10YEAR", "10Y"), ("BC_30YEAR", "30Y")]:
+            val = number(fields.get(key))
+            if val is not None:
+                output.append(dict(tenor=tenor, value=val, as_of=date+"T00:00:00+00:00",
+                    observation_date=date, frequency="daily", delay="End-of-day series",
+                    source="US Treasury par yields", source_url="https://home.treasury.gov/treasury-daily-interest-rate-xml-feed"))
+    return output
+
+
+def treasury_daily_yields(now):
+    start = now - timedelta(days=400)
+    output = []
+    errors = []
+    for year in range(now.year, start.year-1, -1):
+        try:
+            response = get(TREASURY_XML, params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": str(year)})
+            output.extend(parse_treasury_xml(response.content, start.date().isoformat()))
+        except (requests.RequestException, ET_XML.ParseError, ValueError) as error:
+            errors.append(error)
+    if not output:
+        if errors:
+            raise errors[0]
+        raise ValueError("Treasury returned no recognized par-yield observations")
+    return output
+
+
+def daily_yields(settings, now):
+    """Independent official fallback when FRED is unavailable from the hosting server."""
+    try:
+        rows = fred_daily_yields(settings, now)
+        if not rows or {r["tenor"] for r in rows} != {"10Y", "30Y"}:
+            raise ValueError("FRED returned incomplete Treasury history")
+        return rows
+    except (requests.RequestException, ValueError, KeyError, pd.errors.ParserError):
+        return treasury_daily_yields(now)
 
 
 def reference_from_title(title):

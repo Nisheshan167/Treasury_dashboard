@@ -24,11 +24,16 @@ def reaction(event, quotes, tenor, window="60 min"):
         from zoneinfo import ZoneInfo
         day = release.astimezone(ZoneInfo("America/New_York")).date().isoformat()
         daily = [q for q in quotes if q["tenor"] == tenor and q["frequency"] == "daily"]
-        before = sorted([q for q in daily if q["observation_date"] < day], key=lambda q: q["observation_date"])
-        after = [q for q in daily if q["observation_date"] == day]
-        if not before or not after:
+        pairs = []
+        for source in sorted({q["source"] for q in daily}):
+            rows = [q for q in daily if q["source"] == source]
+            before = sorted([q for q in rows if q["observation_date"] < day], key=lambda q: q["observation_date"])
+            after = [q for q in rows if q["observation_date"] == day]
+            if before and after:
+                pairs.append((before[-1], after[-1]))
+        if not pairs:
             return None
-        pre, post = before[-1], after[-1]
+        pre, post = max(pairs, key=lambda pair: pair[0]["observation_date"])
         if (release.date() - dt(pre["as_of"]).date()).days > 5:
             return None
     else:
