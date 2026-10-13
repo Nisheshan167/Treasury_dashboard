@@ -46,6 +46,9 @@ def collect(settings, store=None, now=None):
         return {"state": "Another collector is running"}
     summary = {}
     def run(name, interval, fn):
+        previous = store.get("status", name, {})
+        if previous.get("ok") is False and not any(code in previous.get("message", "") for code in ["HTTP 403", "HTTP 429"]):
+            interval = min(interval, 120)
         if not store.due(name, interval, now):
             return
         store.put("meta", "attempt_" + name, iso(now))
@@ -55,7 +58,15 @@ def collect(settings, store=None, now=None):
             summary[name] = message
         except Exception as error:
             # Never expose exception strings: provider errors may contain secret query parameters.
-            message = f"Update failed ({type(error).__name__}). Existing records retained; check credentials, coverage or provider availability."
+            response = getattr(error, "response", None)
+            code = getattr(response, "status_code", None)
+            detail = f"HTTP {code}" if code else type(error).__name__
+            if code == 403:
+                message = "Update failed (HTTP 403). The publisher rejected this server's request. Date coverage from this source remains unavailable; existing records retained."
+            elif code == 429:
+                message = "Update failed (HTTP 429). Provider rate limit; regular retry interval retained."
+            else:
+                message = f"Update failed ({detail}). Existing records retained; retry eligible in 2 minutes."
             store.status(name, False, message, utcnow())
             summary[name] = message
 
